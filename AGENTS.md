@@ -20,3 +20,17 @@ Follow the Conventional Commits style visible in `git log` (e.g., `feat(proxy): 
 
 ## Environment & Configuration Tips
 Copy `.env_example` to `.env` and override only the keys you touch; avoid committing secrets. SQLite state is persisted in `data/one-mcp.db`, so remove it if you need a clean slate. When integrating external services, prefer storing credentials in `.env` and referencing them via `config/` structs rather than hardcoding values.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as local markdown files under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context. See `docs/agents/domain.md`.
