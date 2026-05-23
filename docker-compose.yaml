@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   one-mcp:
-    image: docker.io/buru2020/one-mcp:latest
+    image: ghcr.io/losesynchronization/one-mcp:latest
     container_name: one-mcp
     restart: unless-stopped
     ports:
