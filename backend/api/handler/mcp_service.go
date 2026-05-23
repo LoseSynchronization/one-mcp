@@ -65,6 +65,12 @@ func UpdateMCPService(c *gin.Context) {
 		return
 	}
 
+	// 验证服务名不含分隔符（防止与 native mode 工具名解析冲突）
+	if err := validateServiceNameDelimiter(service.Name); err != nil {
+		common.RespErrorStr(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// 验证服务类型
 	if !isValidServiceType(service.Type) {
 		common.RespErrorStr(c, http.StatusBadRequest, i18n.Translate("invalid_service_type", lang))

@@ -71,6 +71,19 @@ func sanitizeServiceName(raw string) string {
 	return name
 }
 
+// validateServiceNameDelimiter checks if the service name contains the configured native mode delimiter.
+// Service names must not contain the delimiter character to avoid ambiguity in native mode tool name parsing.
+func validateServiceNameDelimiter(name string) error {
+	delimiter := common.OptionMap[common.OptionGroupNativeToolDelimiter]
+	if delimiter == "" {
+		delimiter = "."
+	}
+	if strings.Contains(name, delimiter) {
+		return fmt.Errorf("service name cannot contain '%s' (the native mode tool delimiter)", delimiter)
+	}
+	return nil
+}
+
 // GetPackageDetails godoc
 // @Summary 获取包详情
 // @Description 获取指定包的详细信息
@@ -1665,6 +1678,12 @@ func CreateCustomService(c *gin.Context) {
 		return
 	}
 
+	// 验证服务名不含分隔符（防止与 native mode 工具名解析冲突）
+	if err := validateServiceNameDelimiter(sanitizedName); err != nil {
+		common.RespErrorStr(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// 检查服务名称唯一性
 	existingService, err := model.GetServiceByName(sanitizedName)
 	if err == nil && existingService != nil {
@@ -1806,6 +1825,9 @@ func CreateCustomService(c *gin.Context) {
 			log.Printf("Warning: UpdateMCPServiceHealth failed for custom service %s (ID: %d): %v", newService.Name, newService.ID, err)
 		}
 	}
+
+	// 异步刷新工具缓存
+	proxy.RefreshServiceTools(c.Request.Context(), &newService)
 
 	common.RespSuccess(c, gin.H{
 		"message":        "自定义服务创建成功",

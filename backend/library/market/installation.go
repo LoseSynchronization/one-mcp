@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// OnServiceInstalled is called after a service installation completes successfully.
+// Handler code sets this at startup to trigger async tool cache refresh.
+var OnServiceInstalled func(serviceID int64)
+
 // InstallationStatus 表示安装状态
 type InstallationStatus string
 
@@ -331,6 +335,11 @@ func (m *InstallationManager) updateServiceStatus(task *InstallationTask, server
 	log.Printf("[InstallationManager] Service %s (ID: %d) will be managed by ServiceManager when enabled", serviceToUpdate.Name, serviceToUpdate.ID)
 
 	log.Printf("[InstallationManager] Service processing completed for ID: %d, Name: %s", serviceToUpdate.ID, serviceToUpdate.Name)
+
+	// Notify hook that a service was installed (e.g. for async tool cache refresh)
+	if OnServiceInstalled != nil {
+		OnServiceInstalled(task.ServiceID)
+	}
 }
 
 // CleanupTask 清理任务

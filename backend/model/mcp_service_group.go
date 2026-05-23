@@ -15,6 +15,7 @@ type MCPServiceGroup struct {
 	DisplayName    string `db:"display_name" json:"display_name"`
 	Description    string `db:"description" json:"description"`
 	ServiceIDsJSON string `db:"service_ids_json" json:"service_ids_json"`
+	Mode           string `db:"mode,default:'wrapped'" json:"mode"`
 	Enabled        bool   `db:"enabled" json:"enabled"`
 }
 
@@ -73,6 +74,12 @@ func GetMCPServiceGroupByID(id int64, userID int64) (*MCPServiceGroup, error) {
 func (g *MCPServiceGroup) Insert() error {
 	if g.UserID == 0 || g.Name == "" || g.DisplayName == "" {
 		return errors.New("missing_required_fields")
+	}
+	if g.Mode == "" {
+		g.Mode = "wrapped"
+	}
+	if g.Mode != "wrapped" && g.Mode != "native" {
+		return errors.New("invalid_group_mode")
 	}
 	return MCPServiceGroupDB.Save(g)
 }

@@ -8,6 +8,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Badge } from '@/components/ui/badge'
 import { Plus, Pencil, Trash2, Copy, Layers, Download } from 'lucide-react';
 import api, { GroupService } from '@/utils/api';
 import { useServerAddress } from '@/hooks/useServerAddress';
@@ -28,6 +30,7 @@ interface Group {
     display_name: string;
     description: string;
     service_ids_json: string;
+    mode: string;
     enabled: boolean;
 }
 
@@ -45,6 +48,7 @@ const GroupModal: React.FC<GroupModalProps> = ({ isOpen, onClose, group, service
         name: '',
         display_name: '',
         service_ids: [] as number[],
+        mode: 'wrapped',
         enabled: true
     });
     const [loading, setLoading] = useState(false);
@@ -65,6 +69,7 @@ const GroupModal: React.FC<GroupModalProps> = ({ isOpen, onClose, group, service
                 name: group.name,
                 display_name: group.display_name,
                 service_ids: ids,
+                mode: group.mode || 'wrapped',
                 enabled: group.enabled
             });
         } else {
@@ -72,6 +77,7 @@ const GroupModal: React.FC<GroupModalProps> = ({ isOpen, onClose, group, service
                 name: '',
                 display_name: '',
                 service_ids: [],
+                mode: 'wrapped',
                 enabled: true
             });
         }
@@ -155,6 +161,30 @@ const GroupModal: React.FC<GroupModalProps> = ({ isOpen, onClose, group, service
                             checked={formData.enabled}
                             onCheckedChange={(checked) => setFormData({ ...formData, enabled: checked })}
                         />
+                    </div>
+                    <div className="grid grid-cols-4 items-center gap-4">
+                        <Label htmlFor="mode" className="text-right">
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <span className="cursor-help border-b border-dotted border-muted-foreground">{t('groups.mode')}</span>
+                                </TooltipTrigger>
+                                <TooltipContent side="left" className="max-w-xs">
+                                    <p>{t('groups.modeHelp')}</p>
+                                </TooltipContent>
+                            </Tooltip>
+                        </Label>
+                        <Select
+                            value={formData.mode}
+                            onValueChange={(value) => setFormData({ ...formData, mode: value })}
+                        >
+                            <SelectTrigger id="mode" className="col-span-3">
+                                <SelectValue placeholder={t('groups.selectMode')} />
+                            </SelectTrigger>
+                            <SelectContent>
+                                <SelectItem value="wrapped">{t('groups.modeWrapped')}</SelectItem>
+                                <SelectItem value="native">{t('groups.modeNative')}</SelectItem>
+                            </SelectContent>
+                        </Select>
                     </div>
                     <div className="grid grid-cols-4 gap-4">
                         <Label className="text-right pt-2">{t('groups.services')}</Label>
@@ -323,12 +353,42 @@ export const GroupPage = () => {
         return `${baseUrl}/group/${name}/mcp?key=${userToken || '<YOUR_TOKEN>'}`;
     };
 
+    const generateGroupConfig = (name: string) => {
+        const url = getGroupUrl(name);
+        const config = {
+            mcpServers: {
+                [name]: {
+                    type: "streamableHttp",
+                    url: url
+                }
+            }
+        };
+        return JSON.stringify(config, null, 2);
+    };
+
     const handleCopyToClipboard = async (text: string) => {
         const result = await copyToClipboard(text);
         if (result.success) {
             toast({
                 title: t('common.success'),
                 description: t('services.copiedToClipboard'),
+            });
+        } else {
+            toast({
+                variant: "destructive",
+                title: t('common.error'),
+                description: t('clipboardError.execCommandFailed'),
+            });
+        }
+    };
+
+    const handleCopyConfig = async (name: string) => {
+        const config = generateGroupConfig(name);
+        const result = await copyToClipboard(config);
+        if (result.success) {
+            toast({
+                title: t('common.success'),
+                description: t('groups.configCopied'),
             });
         } else {
             toast({
@@ -476,19 +536,43 @@ export const GroupPage = () => {
                                         <span>{serviceCount} {t('groups.services')}</span>
                                     </div>
 
+                                    <div className="flex items-center gap-2">
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <Badge variant={group.mode === 'native' ? 'default' : 'secondary'} className="text-xs cursor-help">
+                                                    {group.mode === 'native' ? t('groups.modeNative') : t('groups.modeWrapped')}
+                                                </Badge>
+                                            </TooltipTrigger>
+                                            <TooltipContent side="bottom" className="max-w-sm">
+                                                <p>{group.mode === 'native' ? t('groups.modeNativeDesc') : t('groups.modeWrappedDesc')}</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    </div>
+
                                     <div className="bg-muted p-3 rounded-md space-y-2">
                                         <div className="text-xs font-medium text-muted-foreground">{t('groups.endpoint')}</div>
                                         <div className="flex items-center gap-2">
                                             <code className="text-xs flex-1 truncate bg-background p-1.5 rounded border">
                                                 {url}
                                             </code>
-                                            <Button 
-                                                variant="ghost" 
-                                                size="icon" 
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
                                                 className="h-8 w-8 shrink-0"
-                                            onClick={() => handleCopyToClipboard(url)}
+                                                onClick={() => handleCopyToClipboard(url)}
+                                                title={t('groups.copyEndpoint')}
                                             >
                                                 <Copy className="h-4 w-4" />
+                                            </Button>
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                className="h-8 shrink-0 text-xs"
+                                                onClick={() => handleCopyConfig(group.name)}
+                                                title={t('groups.copyConfig')}
+                                            >
+                                                <Copy className="h-3 w-3 mr-1" />
+                                                {t('groups.copyConfig')}
                                             </Button>
                                         </div>
                                     </div>

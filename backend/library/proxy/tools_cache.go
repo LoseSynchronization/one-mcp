@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"one-mcp/backend/model"
 	"sync"
 	"time"
 
@@ -134,9 +135,82 @@ func (tcm *ToolsCacheManager) DeleteServiceTools(serviceID int64) {
 var globalToolsCacheManager *ToolsCacheManager
 var toolsCacheOnce sync.Once
 
+// OnToolsCached is called after a service's tools are cached or refreshed.
+// Handler code can set this to clear stale handler caches that depend on tool lists.
+var OnToolsCached func(serviceID int64)
+
 func GetToolsCacheManager() *ToolsCacheManager {
 	toolsCacheOnce.Do(func() {
 		globalToolsCacheManager = NewToolsCacheManager(10 * time.Minute)
 	})
 	return globalToolsCacheManager
+}
+
+// RefreshServiceTools fetches tools from a service and writes them to the cache.
+// Runs asynchronously in a goroutine. Errors are logged but not returned to the caller.
+func RefreshServiceTools(ctx context.Context, svc *model.MCPService) {
+	if svc == nil {
+		return
+	}
+	go func() {
+		sharedInst, err := GetOrCreateSharedMcpInstanceWithKey(ctx, svc,
+			SharedServiceCacheKey(svc.ID), SharedServiceInstanceName(svc.ID), svc.DefaultEnvsJSON)
+		if err != nil {
+			log.Printf("[ToolsCache] Failed to get shared instance for %s: %v", svc.Name, err)
+			return
+		}
+		toolsReq := mcp.ListToolsRequest{}
+		result, err := sharedInst.Client.ListTools(ctx, toolsReq)
+		if err != nil {
+			log.Printf("[ToolsCache] Failed to list tools for %s: %v", svc.Name, err)
+			return
+		}
+		if result == nil {
+			return
+		}
+		GetToolsCacheManager().SetServiceTools(svc.ID, &ToolsCacheEntry{
+			Tools:     result.Tools,
+			FetchedAt: time.Now(),
+		})
+		if OnToolsCached != nil {
+			OnToolsCached(svc.ID)
+		}
+		log.Printf("[ToolsCache] Refreshed %d tools for %s (ID: %d)", len(result.Tools), svc.Name, svc.ID)
+	}()
+}
+
+// StartPeriodicRefresh starts a background goroutine that periodically refreshes all cached tool entries.
+// The ticker runs on the configured expireTime interval. Pass context cancellation to stop.
+func StartPeriodicRefresh(ctx context.Context) {
+	tcm := GetToolsCacheManager()
+	if tcm.expireTime <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(tcm.expireTime)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tcm.mutex.RLock()
+				keys := make([]string, 0, len(tcm.local))
+				for k := range tcm.local {
+					keys = append(keys, k)
+				}
+				tcm.mutex.RUnlock()
+				for _, key := range keys {
+					// Extract service ID from cache key "tools:service:{id}"
+					var svcID int64
+					if _, err := fmt.Sscanf(key, "tools:service:%d", &svcID); err == nil && svcID > 0 {
+						svc, err := model.GetServiceByID(svcID)
+						if err == nil && svc.Enabled {
+							RefreshServiceTools(ctx, svc)
+						}
+					}
+				}
+			}
+		}
+	}()
 }

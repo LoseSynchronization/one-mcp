@@ -103,3 +103,15 @@ const (
 const (
 	OptionMcpToolCallTimeout = "McpToolCallTimeout"
 )
+
+// Group mode constants
+const (
+	GroupModeWrapped = "wrapped"
+	GroupModeNative  = "native"
+)
+
+// Group native mode tool delimiter
+// Configurable system-wide, defaults to "."
+const (
+	OptionGroupNativeToolDelimiter = "GroupNativeToolDelimiter"
+)

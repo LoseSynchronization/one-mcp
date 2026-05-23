@@ -29,6 +29,7 @@ type groupResponse struct {
 	DisplayName    string `json:"display_name"`
 	Description    string `json:"description"`
 	ServiceIDsJSON string `json:"service_ids_json"`
+	Mode           string `json:"mode"`
 	Enabled        bool   `json:"enabled"`
 }
 
@@ -432,4 +433,409 @@ func TestGroupMCPHandlerInvalidSessionReturnsNotFound(t *testing.T) {
 
 	GroupMCPHandler(ctx)
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
+}
+
+// ---------- Native mode tests ----------
+
+func TestGroupNativeModeToolsList(t *testing.T) {
+	teardown := setupGroupTestDB(t)
+	defer teardown()
+
+	gin.SetMode(gin.TestMode)
+
+	// Create a service
+	svc := &model.MCPService{
+		Name:        "test-svc",
+		DisplayName: "Test Service",
+		Type:        model.ServiceTypeStdio,
+		Command:     "echo",
+		ArgsJSON:    `[]`,
+		Enabled:     true,
+	}
+	err := model.CreateService(svc)
+	assert.NoError(t, err)
+
+	dbService, err := model.GetServiceByName("test-svc")
+	assert.NoError(t, err)
+
+	// Create group in native mode
+	group := &model.MCPServiceGroup{
+		UserID:      1,
+		Name:        "native-tools",
+		DisplayName: "Native Tools",
+		Mode:        "native",
+		Enabled:     true,
+	}
+	group.SetServiceIDs([]int64{dbService.ID})
+	err = group.Insert()
+	assert.NoError(t, err)
+
+	// Seed tools cache
+	cache := proxy.GetToolsCacheManager()
+	cache.SetServiceTools(dbService.ID, &proxy.ToolsCacheEntry{
+		Tools: []mcp.Tool{
+			{
+				Name:        "get_page",
+				Description: "Fetch a web page",
+				InputSchema: mcp.ToolInputSchema{
+					Type: "object",
+					Properties: map[string]any{
+						"url": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	})
+	defer cache.DeleteServiceTools(dbService.ID)
+
+	sessionID, _ := initializeGroupSession(t, "native-tools", 1)
+
+	// Call tools/list - should see the real tool (test-svc.get_page) + list_tools
+	reqBody := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/list",
+	}
+	req := newJSONRequest(t, http.MethodPost, "/group/native-tools/mcp", reqBody)
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+	ctx.Params = gin.Params{{Key: "name", Value: "native-tools"}}
+	ctx.Set("user_id", int64(1))
+
+	GroupMCPHandler(ctx)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	resp := decodeMCPResponse(t, recorder)
+	tools, ok := resp.Result["tools"].([]any)
+	assert.True(t, ok, "tools/list should return tools array")
+	// Should have just the real tool registered, no utility tools
+	assert.Equal(t, 1, len(tools), "native mode should have 1 real tool")
+}
+
+func TestGroupNativeModePrefixedToolNames(t *testing.T) {
+	teardown := setupGroupTestDB(t)
+	defer teardown()
+
+	gin.SetMode(gin.TestMode)
+
+	svc := &model.MCPService{
+		Name:        "fetch",
+		DisplayName: "Fetch Service",
+		Type:        model.ServiceTypeStdio,
+		Command:     "echo",
+		ArgsJSON:    `[]`,
+		Enabled:     true,
+	}
+	err := model.CreateService(svc)
+	assert.NoError(t, err)
+
+	dbService, err := model.GetServiceByName("fetch")
+	assert.NoError(t, err)
+
+	group := &model.MCPServiceGroup{
+		UserID:      1,
+		Name:        "native-prefix",
+		DisplayName: "Native Prefix",
+		Mode:        "native",
+		Enabled:     true,
+	}
+	group.SetServiceIDs([]int64{dbService.ID})
+	err = group.Insert()
+	assert.NoError(t, err)
+
+	cache := proxy.GetToolsCacheManager()
+	cache.SetServiceTools(dbService.ID, &proxy.ToolsCacheEntry{
+		Tools: []mcp.Tool{
+			{
+				Name:        "get_page",
+				Description: "Fetch a web page",
+				InputSchema: mcp.ToolInputSchema{
+					Type: "object",
+					Properties: map[string]any{
+						"url": map[string]any{"type": "string"},
+					},
+				},
+			},
+			{
+				Name:        "search",
+				Description: "Search the web",
+				InputSchema: mcp.ToolInputSchema{
+					Type: "object",
+					Properties: map[string]any{
+						"query": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	})
+	defer cache.DeleteServiceTools(dbService.ID)
+
+	sessionID, _ := initializeGroupSession(t, "native-prefix", 1)
+
+	// Verify tools/list shows prefixed names
+	listReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/list",
+	}
+	req := newJSONRequest(t, http.MethodPost, "/group/native-prefix/mcp", listReq)
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+	ctx.Params = gin.Params{{Key: "name", Value: "native-prefix"}}
+	ctx.Set("user_id", int64(1))
+
+	GroupMCPHandler(ctx)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	resp := decodeMCPResponse(t, recorder)
+	tools, ok := resp.Result["tools"].([]any)
+	assert.True(t, ok)
+	assert.Equal(t, 2, len(tools), "should have 2 real tools")
+
+	// Check names are prefixed
+	foundPages := false
+	foundSearch := false
+	for _, tRaw := range tools {
+		tool, _ := tRaw.(map[string]any)
+		name, _ := tool["name"].(string)
+		if name == "fetch.get_page" {
+			foundPages = true
+		}
+		if name == "fetch.search" {
+			foundSearch = true
+		}
+	}
+	assert.True(t, foundPages, "tools/list should contain fetch.get_page")
+	assert.True(t, foundSearch, "tools/list should contain fetch.search")
+}
+
+func TestGroupNativeModeCallToolDirect(t *testing.T) {
+	teardown := setupGroupTestDB(t)
+	defer teardown()
+
+	gin.SetMode(gin.TestMode)
+
+	svc := &model.MCPService{
+		Name:        "fetch",
+		DisplayName: "Fetch Service",
+		Type:        model.ServiceTypeStdio,
+		Command:     "echo",
+		ArgsJSON:    `[]`,
+		Enabled:     true,
+	}
+	err := model.CreateService(svc)
+	assert.NoError(t, err)
+
+	dbService, err := model.GetServiceByName("fetch")
+	assert.NoError(t, err)
+
+	group := &model.MCPServiceGroup{
+		UserID:      1,
+		Name:        "native-direct",
+		DisplayName: "Native Direct",
+		Mode:        "native",
+		Enabled:     true,
+	}
+	group.SetServiceIDs([]int64{dbService.ID})
+	err = group.Insert()
+	assert.NoError(t, err)
+
+	cache := proxy.GetToolsCacheManager()
+	cache.SetServiceTools(dbService.ID, &proxy.ToolsCacheEntry{
+		Tools: []mcp.Tool{
+			{
+				Name:        "get_page",
+				Description: "Fetch a web page",
+				InputSchema: mcp.ToolInputSchema{
+					Type: "object",
+					Properties: map[string]any{
+						"url": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	})
+	defer cache.DeleteServiceTools(dbService.ID)
+
+	sessionID, _ := initializeGroupSession(t, "native-direct", 1)
+
+	// Verify tools/list includes the directly registered tool with prefixed name
+	listReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/list",
+	}
+	req := newJSONRequest(t, http.MethodPost, "/group/native-direct/mcp", listReq)
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+	ctx.Params = gin.Params{{Key: "name", Value: "native-direct"}}
+	ctx.Set("user_id", int64(1))
+
+	GroupMCPHandler(ctx)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	resp := decodeMCPResponse(t, recorder)
+	tools, ok := resp.Result["tools"].([]any)
+	assert.True(t, ok)
+
+	// Find the prefixed tool name in the returned list
+	foundPrefixed := false
+	for _, tool := range tools {
+		toolMap, ok := tool.(map[string]any)
+		if ok && toolMap["name"] == "fetch.get_page" {
+			foundPrefixed = true
+			break
+		}
+	}
+	assert.True(t, foundPrefixed, "tools/list should contain 'fetch.get_page'")
+}
+
+func TestGroupNativeModeCallToolInvalidName(t *testing.T) {
+	teardown := setupGroupTestDB(t)
+	defer teardown()
+
+	gin.SetMode(gin.TestMode)
+
+	group := &model.MCPServiceGroup{
+		UserID:      1,
+		Name:        "native-invalid",
+		DisplayName: "Native Invalid",
+		Mode:        "native",
+		Enabled:     true,
+	}
+	group.SetServiceIDs([]int64{})
+	err := group.Insert()
+	assert.NoError(t, err)
+
+	sessionID, _ := initializeGroupSession(t, "native-invalid", 1)
+
+	// Call tools/call with a non-existent tool name
+	reqBody := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "nosuchtool",
+			"arguments": map[string]any{},
+		},
+	}
+	req := newJSONRequest(t, http.MethodPost, "/group/native-invalid/mcp", reqBody)
+	req.Header.Set("Mcp-Session-Id", sessionID)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+	ctx.Params = gin.Params{{Key: "name", Value: "native-invalid"}}
+	ctx.Set("user_id", int64(1))
+
+	GroupMCPHandler(ctx)
+	assert.Equal(t, http.StatusOK, recorder.Code)
+
+	resp := decodeMCPResponse(t, recorder)
+	// MCP protocol returns error in the response for unknown tool
+	assert.NotNil(t, resp.Error, "calling non-existent tool should return error")
+}
+
+func TestGroupNativeModeDisabledGroup(t *testing.T) {
+	teardown := setupGroupTestDB(t)
+	defer teardown()
+
+	gin.SetMode(gin.TestMode)
+
+	group := &model.MCPServiceGroup{
+		UserID:      1,
+		Name:        "native-disabled",
+		DisplayName: "Native Disabled",
+		Mode:        "native",
+		Enabled:     false,
+	}
+	group.SetServiceIDs([]int64{})
+	err := group.Insert()
+	assert.NoError(t, err)
+
+	// Try to initialize - should fail
+	reqBody := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+		"params": map[string]any{
+			"protocolVersion": mcp.LATEST_PROTOCOL_VERSION,
+			"clientInfo": map[string]any{
+				"name":    "group-test",
+				"version": "0.0.0",
+			},
+			"capabilities": map[string]any{},
+		},
+	}
+	req := newJSONRequest(t, http.MethodPost, "/group/native-disabled/mcp", reqBody)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+	ctx.Params = gin.Params{{Key: "name", Value: "native-disabled"}}
+	ctx.Set("user_id", int64(1))
+
+	GroupMCPHandler(ctx)
+	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+
+	resp := decodeMCPResponse(t, recorder)
+	assert.NotNil(t, resp.Error, "disabled group should return error")
+	assert.Contains(t, resp.Error["message"], "disabled")
+}
+
+func TestGroupNativeModeCRUD(t *testing.T) {
+	teardown := setupGroupTestDB(t)
+	defer teardown()
+
+	gin.SetMode(gin.TestMode)
+
+	// Create with native mode
+	createPayload := map[string]any{
+		"name":             "native-group-a",
+		"display_name":     "Native Group A",
+		"mode":             "native",
+		"service_ids_json": "[]",
+	}
+	createReq := newJSONRequest(t, http.MethodPost, "/api/groups", createPayload)
+	createRecorder := httptest.NewRecorder()
+	createCtx, _ := gin.CreateTestContext(createRecorder)
+	createCtx.Request = createReq
+	createCtx.Set("user_id", int64(1))
+	createCtx.Set("lang", "en")
+
+	CreateGroup(createCtx)
+	assert.Equal(t, http.StatusOK, createRecorder.Code)
+
+	createResp := decodeAPIResponse(t, createRecorder)
+	assert.True(t, createResp.Success)
+
+	var createdGroup groupResponse
+	err := json.Unmarshal(createResp.Data, &createdGroup)
+	assert.NoError(t, err)
+	assert.Equal(t, "native", createdGroup.Mode, "group should be created with native mode")
+
+	// Update mode to wrapped
+	updatePayload := map[string]any{
+		"mode": "wrapped",
+	}
+	updateReq := newJSONRequest(t, http.MethodPut, "/api/groups/1", updatePayload)
+	updateRecorder := httptest.NewRecorder()
+	updateCtx, _ := gin.CreateTestContext(updateRecorder)
+	updateCtx.Request = updateReq
+	updateCtx.Params = gin.Params{{Key: "id", Value: "1"}}
+	updateCtx.Set("user_id", int64(1))
+	updateCtx.Set("lang", "en")
+
+	UpdateGroup(updateCtx)
+	assert.Equal(t, http.StatusOK, updateRecorder.Code)
+
+	updateResp := decodeAPIResponse(t, updateRecorder)
+	var updatedGroup groupResponse
+	err = json.Unmarshal(updateResp.Data, &updatedGroup)
+	assert.NoError(t, err)
+	assert.Equal(t, "wrapped", updatedGroup.Mode, "mode should be updated to wrapped")
 }

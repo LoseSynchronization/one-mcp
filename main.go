@@ -11,10 +11,12 @@ import (
 	"strings"
 	"syscall"
 
+	"one-mcp/backend/api/handler"
 	"one-mcp/backend/api/middleware"
 	"one-mcp/backend/api/route"
 	"one-mcp/backend/common"
 	"one-mcp/backend/common/i18n"
+	"one-mcp/backend/library/market"
 	"one-mcp/backend/library/proxy"
 	"one-mcp/backend/model"
 
@@ -101,6 +103,22 @@ func main() {
 			common.SysLog("Service manager initialized successfully")
 		}
 	}()
+
+	// Wire up post-installation tool cache refresh
+	market.OnServiceInstalled = func(serviceID int64) {
+		svc, err := model.GetServiceByID(serviceID)
+		if err == nil {
+			proxy.RefreshServiceTools(context.Background(), svc)
+		}
+	}
+
+	// Wire up post-refresh handler cache clearing (so native-mode groups rebuild with new tools)
+	proxy.OnToolsCached = func(serviceID int64) {
+		handler.ClearGroupHandlerCaches()
+	}
+
+	// Start periodic tool cache refresh
+	proxy.StartPeriodicRefresh(context.Background())
 
 	// Initialize HTTP server
 	server := gin.Default()

@@ -17,6 +17,7 @@ type groupPayload struct {
 	DisplayName    string `json:"display_name"`
 	Description    string `json:"description"`
 	ServiceIDsJSON string `json:"service_ids_json"`
+	Mode           string `json:"mode"`
 	Enabled        *bool  `json:"enabled"`
 }
 
@@ -53,7 +54,11 @@ func CreateGroup(c *gin.Context) {
 		DisplayName:    strings.TrimSpace(payload.DisplayName),
 		Description:    strings.TrimSpace(payload.Description),
 		ServiceIDsJSON: filteredServiceIDsJSON,
+		Mode:           payload.Mode,
 		Enabled:        true,
+	}
+	if payload.Mode == "" {
+		group.Mode = "wrapped"
 	}
 	if payload.Enabled != nil {
 		group.Enabled = *payload.Enabled
@@ -99,6 +104,9 @@ func UpdateGroup(c *gin.Context) {
 	if payload.ServiceIDsJSON != "" {
 		// Filter out disabled services
 		group.ServiceIDsJSON = filterEnabledServiceIDs(payload.ServiceIDsJSON)
+	}
+	if payload.Mode != "" {
+		group.Mode = payload.Mode
 	}
 	if payload.Enabled != nil {
 		group.Enabled = *payload.Enabled

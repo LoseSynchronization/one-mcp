@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,11 +10,16 @@ import (
 	"time"
 
 	"one-mcp/backend/common"
+	"one-mcp/backend/library/proxy"
 	"one-mcp/backend/model"
+
+	"log"
 
 	mcp "github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
+
+// ---------- Handler caching ----------
 
 type groupMCPHandlerEntry struct {
 	handler     http.Handler
@@ -58,8 +62,10 @@ func groupHandlerCacheKey(groupID int64, userID int64) string {
 }
 
 func groupHandlerFingerprint(group *model.MCPServiceGroup) string {
-	return fmt.Sprintf("%s|%s|%s", group.Name, group.Description, group.ServiceIDsJSON)
+	return fmt.Sprintf("%s|%s|%s|%s", group.Name, group.Description, group.ServiceIDsJSON, group.Mode)
 }
+
+// ---------- Builder dispatch ----------
 
 func buildGroupMCPHandler(group *model.MCPServiceGroup) (http.Handler, error) {
 	server, err := buildGroupMCPServer(group)
@@ -82,161 +88,131 @@ func buildGroupMCPServer(group *model.MCPServiceGroup) (*mcpserver.MCPServer, er
 	}
 
 	server := mcpserver.NewMCPServer(serverName, "1.0.0", serverOptions...)
-	if err := addGroupTools(server, group); err != nil {
+
+	if group.Mode == common.GroupModeNative {
+		return buildNativeMCPServer(server, group)
+	}
+
+	// Default: wrapped mode
+	return buildWrappedMCPServer(server, group)
+}
+
+// ---------- Shared tool execution ----------
+
+// contextKey for storing per-request values in the MCP context.
+type contextKey string
+
+const (
+	clientNameKey contextKey = "client_name"
+	userIDKey     contextKey = "user_id"
+)
+
+// callServiceTool handles the common execution flow: RPD check → get instance → CallTool → record stats → log.
+// Returns the upstream response as a map ready for toolResultFromStructured.
+func callServiceTool(ctx context.Context, svc *model.MCPService, toolName string, arguments map[string]any, groupName string) (any, error) {
+	start := time.Now()
+
+	// Get userID from context for RPD check and stats
+	var userID int64
+	if uid, ok := ctx.Value(userIDKey).(int64); ok {
+		userID = uid
+	}
+
+	// Check daily request limit (RPD) if limit is set
+	if userID > 0 && svc.RPDLimit > 0 {
+		if rpdErr := checkDailyRequestLimit(svc.ID, userID, svc.RPDLimit); rpdErr != nil {
+			return nil, rpdErr
+		}
+	}
+
+	sharedInst, err := proxy.GetOrCreateSharedMcpInstanceWithKey(ctx, svc, proxy.SharedServiceCacheKey(svc.ID), proxy.SharedServiceInstanceName(svc.ID), svc.DefaultEnvsJSON)
+	if err != nil {
 		return nil, err
 	}
-	if err := addGroupResources(server, group); err != nil {
+
+	callReq := mcp.CallToolRequest{}
+	callReq.Params.Name = toolName
+	callReq.Params.Arguments = arguments
+
+	toolCallCtx, cancel := context.WithTimeout(ctx, proxy.McpToolCallTimeout())
+	defer cancel()
+
+	result, err := sharedInst.Client.CallTool(toolCallCtx, callReq)
+	duration := time.Since(start)
+
+	// Get client name from context
+	clientName := ""
+	if cn, ok := ctx.Value(clientNameKey).(string); ok {
+		clientName = cn
+	}
+
+	// Determine success: no error AND result.IsError is false
+	success := err == nil && (result == nil || !result.IsError)
+
+	// Only record stats for successful calls (not errors or isError responses)
+	if success {
+		go model.RecordRequestStat(
+			svc.ID,
+			svc.Name,
+			userID,
+			model.ProxyRequestTypeHTTP,
+			"tools/call",
+			fmt.Sprintf("/group/%s/mcp", groupName),
+			duration.Milliseconds(),
+			200,
+			true,
+		)
+	}
+
+	// Log the execution
+	logLevel := model.MCPLogLevelInfo
+	logMsg := fmt.Sprintf("Group tool call OK | group=%s | mcp=%s | tool=%s | duration=%dms | client=%s",
+		groupName, svc.Name, toolName, duration.Milliseconds(), clientName)
+	if err != nil {
+		logLevel = model.MCPLogLevelError
+		logMsg = fmt.Sprintf("Group tool call FAILED | group=%s | mcp=%s | tool=%s | duration=%dms | client=%s | error=%v",
+			groupName, svc.Name, toolName, duration.Milliseconds(), clientName, err)
+	} else if result != nil && result.IsError {
+		logLevel = model.MCPLogLevelError
+		logMsg = fmt.Sprintf("Group tool call ERROR | group=%s | mcp=%s | tool=%s | duration=%dms | client=%s | isError=true",
+			groupName, svc.Name, toolName, duration.Milliseconds(), clientName)
+	}
+	if saveErr := model.SaveMCPLog(ctx, svc.ID, svc.Name, model.MCPLogPhaseRun, logLevel, logMsg); saveErr != nil {
+		common.SysError(fmt.Sprintf("Failed to save MCP log for %s: %v", svc.Name, saveErr))
+	}
+
+	if err != nil {
 		return nil, err
 	}
-	return server, nil
+
+	resp := map[string]any{}
+	if result != nil && len(result.Content) > 0 {
+		resp["content"] = result.Content
+	}
+	if result != nil && result.StructuredContent != nil {
+		resp["structuredContent"] = result.StructuredContent
+	}
+	if result != nil && result.IsError {
+		resp["isError"] = true
+	}
+
+	return resp, nil
 }
 
-func addGroupTools(server *mcpserver.MCPServer, group *model.MCPServiceGroup) error {
-	if server == nil {
-		return errors.New("mcp server is nil")
+// ClearGroupHandlerCaches clears all group MCP handler cache entries.
+// Handlers are rebuilt on the next request. Call this after tool caches are refreshed
+// so native-mode groups pick up the updated tool lists.
+func ClearGroupHandlerCaches() {
+	groupMCPHandlersMu.Lock()
+	defer groupMCPHandlersMu.Unlock()
+	cleared := len(groupMCPHandlers)
+	groupMCPHandlers = make(map[string]*groupMCPHandlerEntry)
+	if cleared > 0 {
+		log.Printf("[GroupCache] Cleared %d group handler cache entries", cleared)
 	}
-
-	serviceNames := getGroupServiceNames(group)
-
-	searchTool := mcp.Tool{
-		Name:        "search_tools",
-		Description: "STEP 1: Discover available tools in a service. You MUST call this first before execute_tool.",
-		InputSchema: mcp.ToolInputSchema{
-			Type: "object",
-			Properties: map[string]any{
-				"mcp_name": map[string]any{
-					"type":        "string",
-					"enum":        serviceNames,
-					"description": "MCP service name",
-				},
-			},
-			Required: []string{"mcp_name"},
-		},
-	}
-
-	executeTool := mcp.Tool{
-		Name:        "execute_tool",
-		Description: "STEP 2: Execute a tool found via search_tools. Pass arguments directly, do NOT nest.",
-		InputSchema: mcp.ToolInputSchema{
-			Type: "object",
-			Properties: map[string]any{
-				"mcp_name": map[string]any{
-					"type":        "string",
-					"enum":        serviceNames,
-					"description": "MCP service name",
-				},
-				"tool_name": map[string]any{
-					"type":        "string",
-					"description": "Tool name from search_tools",
-				},
-				"arguments": map[string]any{
-					"type":        "object",
-					"description": "Tool arguments. Example: {\"message\": \"hello\"} for a tool with message param",
-				},
-			},
-			Required: []string{"mcp_name", "tool_name", "arguments"},
-		},
-	}
-
-	server.AddTool(searchTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := common.ParseAnyToMap(request.Params.Arguments)
-		if args == nil {
-			args = map[string]any{}
-		}
-		parsed, err := parseGroupSearchArgs(args)
-		if err != nil {
-			return toolErrorResult(err), nil
-		}
-		result, err := searchGroupTools(ctx, group, parsed)
-		if err != nil {
-			return toolErrorResult(err), nil
-		}
-		return toolResultFromStructured(result), nil
-	})
-
-	server.AddTool(executeTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		args := common.ParseAnyToMap(request.Params.Arguments)
-		if args == nil {
-			args = map[string]any{}
-		}
-		parsed, err := parseExecuteArgs(args)
-		if err != nil {
-			return toolErrorResult(err), nil
-		}
-		result, err := executeGroupTool(ctx, group, parsed)
-		if err != nil {
-			return toolErrorResult(err), nil
-		}
-		return toolResultFromStructured(result), nil
-	})
-
-	return nil
 }
 
-func addGroupResources(server *mcpserver.MCPServer, group *model.MCPServiceGroup) error {
-	if server == nil {
-		return errors.New("mcp server is nil")
-	}
-
-	ids := group.GetServiceIDs()
-	for _, id := range ids {
-		svc, err := model.GetServiceByID(id)
-		if err != nil {
-			// Skip invalid services or handle error
-			continue
-		}
-
-		// Create a unique URI for the resource
-		resourceURI := fmt.Sprintf("mcp://%s/%s", group.Name, svc.Name)
-
-		resource := mcp.Resource{
-			URI:         resourceURI,
-			Name:        svc.Name,
-			Description: svc.Description,
-			MIMEType:    "application/yaml",
-		}
-
-		// Capture svc for the closure
-		currentSvc := svc
-
-		server.AddResource(resource, func(ctx context.Context, request mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
-			args := &groupSearchArgs{
-				MCPName: currentSvc.Name,
-			}
-
-			// Reuse searchGroupTools logic to get tools list
-			result, err := searchGroupTools(ctx, group, args)
-			if err != nil {
-				return nil, err
-			}
-
-			resultMap, ok := result.(map[string]any)
-			if !ok {
-				return nil, fmt.Errorf("internal error: unexpected result type")
-			}
-
-			// Extract tool list from content[0].text
-			var contentStr string
-			if rawContent, ok := resultMap["content"].([]map[string]any); ok && len(rawContent) > 0 {
-				contentStr, _ = rawContent[0]["text"].(string)
-			}
-
-			if contentStr == "" {
-				contentStr = "# No tools available or failed to fetch"
-			}
-
-			return []mcp.ResourceContents{
-				mcp.TextResourceContents{
-					URI:      request.Params.URI,
-					MIMEType: "application/yaml",
-					Text:     contentStr,
-				},
-			}, nil
-		})
-	}
-
-	return nil
-}
+// ---------- Result helpers ----------
 
 func toolErrorResult(err error) *mcp.CallToolResult {
 	return &mcp.CallToolResult{
@@ -253,13 +229,11 @@ func toolErrorResult(err error) *mcp.CallToolResult {
 func toolResultFromStructured(result any) *mcp.CallToolResult {
 	resultMap, _ := result.(map[string]any)
 
-	// Extract content
 	contents := extractContent(resultMap)
 
 	callResult := &mcp.CallToolResult{
 		Content: contents,
 	}
-	// Only set StructuredContent if the key exists in the result map
 	if resultMap != nil {
 		if sc, exists := resultMap["structuredContent"]; exists {
 			if scMap, ok := sc.(map[string]any); ok {
@@ -315,3 +289,4 @@ func extractContent(result map[string]any) []mcp.Content {
 		return nil
 	}
 }
+
