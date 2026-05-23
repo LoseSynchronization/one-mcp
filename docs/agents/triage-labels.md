@@ -13,3 +13,7 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
 
 Edit the right-hand column to match whatever vocabulary you actually use.
+
+## Archiving completed issues
+
+When an issue has been actioned (e.g. a `ready-for-agent` issue was implemented), it exits the triage pipeline. Move the issue file to `.scratch/archive/<feature-slug>/` to physically archive it. Do NOT invent a "completed" or "done" label — the 5 canonical roles have no such term, and the issue is no longer in the triage pipeline.

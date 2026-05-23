@@ -36,3 +36,4 @@ one-mcp*
 *.db
 *.log
 *.yaml
+.idea/claudeCodeTabState.xml
