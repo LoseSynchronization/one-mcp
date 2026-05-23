@@ -45,7 +45,7 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0', 'main') }}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'dev') }}
             type=ref,event=tag
             type=sha,prefix=,suffix=,format=short
 
