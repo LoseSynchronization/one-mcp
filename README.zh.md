@@ -44,7 +44,7 @@ One MCP 是一个全面的模型上下文协议 (MCP) 服务管理平台。作�
 ## 功能特性
 
 - **服务管理** — 从市场或自定义源安装、配置和监控 MCP 服务（stdio / SSE / 可流式 HTTP）
-- **服务组合** — 将多个 MCP 服务组合为单一端点；可导出为 Anthropic Skills，支持 Claude Code 和 Droid
+- **服务组合** — 将多个 MCP 服务组合为单一端点；可导出为 Anthropic Skills，支持 Claude Code 和 Droid。支持 **Wrapped**（两步发现）和 **Native**（直接暴露）两种模式。
 - **数据分析** — 实时跟踪使用量、请求速率、响应时间和系统健康状态
 - **多用户 & OAuth** — 基于角色的访问控制，支持 GitHub / Google 登录
 - **灵活部署** — SQLite（默认）/ MySQL / PostgreSQL，可选 Redis，支持 Docker，国际化（中 / 英）

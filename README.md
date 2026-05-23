@@ -43,7 +43,7 @@ One MCP is a comprehensive management platform for Model Context Protocol (MCP) 
 ## Features
 
 - **Service Management** — Install, configure, and monitor MCP services (stdio / SSE / streamable HTTP) from a marketplace or custom sources
-- **Service Groups** — Combine multiple MCP services into a single endpoint; export as Anthropic Skills for Claude Code & Droid
+- **Service Groups** — Combine multiple MCP services into a single endpoint; export as Anthropic Skills for Claude Code & Droid. Supports **Wrapped** (two-step discovery) and **Native** (direct tool exposure) modes.
 - **Analytics** — Track usage, request rates, response times, and system health in real time
 - **Multi-User & OAuth** — Role-based access control with GitHub / Google login
 - **Flexible Deployment** — SQLite (default) / MySQL / PostgreSQL, optional Redis, Docker ready, i18n (EN / ZH)
